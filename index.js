@@ -15,8 +15,8 @@ const io = new Server(server, {
 });
 
 // Lưu trữ thông tin phòng và người dùng
-const rooms = {};
 const adminSockets = new Set();
+const pendingCalls = new Map(); // Map để lưu trữ các cuộc gọi đang chờ và timeout của chúng
 
 io.on('connection', (socket) => {
     console.log('User connected:', socket.id);
@@ -50,10 +50,25 @@ io.on('connection', (socket) => {
             .filter(s => s.role === 'client')
             .map(s => ({
                 socketId: s.id,
-                userData: s.userData
+                userData: s.userData,
+                // Thêm thông tin cuộc gọi nếu client đang trong trạng thái chờ
+                callStatus: pendingCalls.has(s.id) ? 'waiting' : undefined,
+                callType: pendingCalls.has(s.id) ? pendingCalls.get(s.id).callType : undefined
             }));
 
         socket.emit('current-clients', clients);
+
+        // Gửi thông báo về các cuộc gọi đang chờ cho admin mới kết nối
+        for (const [clientId, callData] of pendingCalls.entries()) {
+            const clientSocket = io.sockets.sockets.get(clientId);
+            if (clientSocket) {
+                socket.emit('incoming-call', {
+                    socketId: clientId,
+                    userData: clientSocket.userData,
+                    callType: callData.callType
+                });
+            }
+        }
     });
 
     // Xử lý tín hiệu WebRTC
@@ -103,6 +118,38 @@ io.on('connection', (socket) => {
         const callType = data?.callType || 'audio'; // Mặc định là audio nếu không có
         console.log(`${callType} call request from client:`, socket.id);
 
+        // Hủy timeout cũ nếu có
+        if (pendingCalls.has(socket.id)) {
+            clearTimeout(pendingCalls.get(socket.id).timeout);
+        }
+
+        // Tạo timeout mới cho cuộc gọi này (60 giây)
+        const timeoutId = setTimeout(() => {
+            console.log(`Call from ${socket.id} timed out after 60 seconds`);
+            // Xóa cuộc gọi khỏi danh sách chờ
+            pendingCalls.delete(socket.id);
+
+            // Thông báo cho client rằng cuộc gọi đã hết hạn
+            socket.emit('call-timeout');
+
+            // Thông báo cho tất cả admin cập nhật trạng thái
+            for (const adminSocketId of adminSockets) {
+                const adminSocket = io.sockets.sockets.get(adminSocketId);
+                if (adminSocket) {
+                    adminSocket.emit('call-timeout', {
+                        socketId: socket.id
+                    });
+                }
+            }
+        }, 60000); // 60 giây
+
+        // Lưu thông tin cuộc gọi và timeout của nó
+        pendingCalls.set(socket.id, {
+            callType: callType,
+            timestamp: Date.now(),
+            timeout: timeoutId
+        });
+
         // Thông báo cho tất cả admin về yêu cầu gọi
         for (const adminSocketId of adminSockets) {
             const adminSocket = io.sockets.sockets.get(adminSocketId);
@@ -125,6 +172,12 @@ io.on('connection', (socket) => {
 
         console.log(`Admin accepted ${data.callType} call for client:`, data.clientId);
 
+        // Hủy timeout nếu có
+        if (pendingCalls.has(data.clientId)) {
+            clearTimeout(pendingCalls.get(data.clientId).timeout);
+            pendingCalls.delete(data.clientId);
+        }
+
         const clientSocket = io.sockets.sockets.get(data.clientId);
         if (clientSocket) {
             clientSocket.emit('call-accepted', {
@@ -138,6 +191,25 @@ io.on('connection', (socket) => {
     socket.on('end-call', (data) => {
         console.log('Call ended by', socket.id);
 
+        // Nếu là client kết thúc cuộc gọi, hủy timeout và xóa khỏi pendingCalls
+        if (socket.role === 'client' && pendingCalls.has(socket.id)) {
+            clearTimeout(pendingCalls.get(socket.id).timeout);
+            pendingCalls.delete(socket.id);
+
+            // Thông báo cho tất cả admin rằng cuộc gọi đã bị hủy
+            for (const adminSocketId of adminSockets) {
+                const adminSocket = io.sockets.sockets.get(adminSocketId);
+                if (adminSocket) {
+                    adminSocket.emit('call-request-cancelled', {
+                        socketId: socket.id,
+                        userData: socket.userData,
+                        callType: data.callType // Thêm thông tin loại cuộc gọi
+                    });
+                }
+            }
+        }
+
+        // Gửi thông báo kết thúc cuộc gọi đến đối tác
         if (data.targetId) {
             const targetSocket = io.sockets.sockets.get(data.targetId);
             if (targetSocket) {
@@ -155,6 +227,12 @@ io.on('connection', (socket) => {
         if (socket.role === 'admin') {
             adminSockets.delete(socket.id);
         } else if (socket.role === 'client') {
+            // Nếu client đang có cuộc gọi chờ thì hủy
+            if (pendingCalls.has(socket.id)) {
+                clearTimeout(pendingCalls.get(socket.id).timeout);
+                pendingCalls.delete(socket.id);
+            }
+
             // Thông báo cho tất cả admin rằng client đã ngắt kết nối
             for (const adminSocketId of adminSockets) {
                 const adminSocket = io.sockets.sockets.get(adminSocketId);
@@ -162,6 +240,29 @@ io.on('connection', (socket) => {
                     adminSocket.emit('client-disconnected', {
                         socketId: socket.id,
                         userData: socket.userData
+                    });
+                }
+            }
+        }
+    });
+
+    // Thêm vào các sự kiện socket
+    socket.on('cancel-call-request', (data) => {
+        console.log(`Client ${socket.id} cancelled call request`);
+
+        // Nếu cuộc gọi đang trong trạng thái chờ
+        if (pendingCalls.has(socket.id)) {
+            clearTimeout(pendingCalls.get(socket.id).timeout);
+            pendingCalls.delete(socket.id);
+
+            // Thông báo cho tất cả admin về việc hủy cuộc gọi
+            for (const adminSocketId of adminSockets) {
+                const adminSocket = io.sockets.sockets.get(adminSocketId);
+                if (adminSocket) {
+                    adminSocket.emit('call-request-cancelled', {
+                        socketId: socket.id,
+                        userData: socket.userData,
+                        callType: data.callType
                     });
                 }
             }
