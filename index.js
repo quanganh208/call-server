@@ -157,16 +157,35 @@ io.on("connection", (socket) => {
     console.log(`${callType} call request from client:`, socket.id);
 
     // Kiểm tra xem yêu cầu có chỉ định admin cụ thể không
-    const targetAdminId = data?.targetAdminPhone
-      ? Array.from(adminSockets.entries()).find(
-          ([_, adminData]) => adminData.phoneNumber === data.targetAdminPhone
-        )?.[0]
-      : null;
+    const targetAdminPhone = data?.targetAdminPhone;
+    let targetAdminId = null;
 
-    // Kiểm tra xem admin có đang trong cuộc gọi không
-    if (targetAdminId) {
+    if (targetAdminPhone) {
+      const foundAdmin = Array.from(adminSockets.entries()).find(
+        ([_, adminData]) => adminData.phoneNumber === targetAdminPhone
+      );
+      targetAdminId = foundAdmin?.[0] || null;
+
+      // Nếu không tìm thấy admin với số điện thoại chỉ định
+      if (!targetAdminId) {
+        console.log(
+          `Admin with phone ${targetAdminPhone} not found or not online`
+        );
+        return socket.emit("admin-not-found", {
+          phoneNumber: targetAdminPhone,
+        });
+      }
+
+      // Kiểm tra xem admin có đang trong cuộc gọi không
       const targetAdminSocket = io.sockets.sockets.get(targetAdminId);
-      if (targetAdminSocket && targetAdminSocket.inCall) {
+      if (!targetAdminSocket) {
+        console.log(`Admin with id ${targetAdminId} not connected`);
+        return socket.emit("admin-not-found", {
+          phoneNumber: targetAdminPhone,
+        });
+      }
+
+      if (targetAdminSocket.inCall) {
         console.log(`Target admin ${targetAdminId} is busy in another call`);
         // Thông báo cho client rằng admin đang bận
         return socket.emit("admin-busy", {
@@ -190,7 +209,7 @@ io.on("connection", (socket) => {
       // Thông báo cho client rằng cuộc gọi đã hết hạn
       socket.emit("call-timeout");
 
-      // Thông báo cho tất cả admin hoặc admin cụ thể cập nhật trạng thái
+      // Thông báo cho admin cụ thể cập nhật trạng thái
       if (targetAdminId) {
         const targetAdminSocket = io.sockets.sockets.get(targetAdminId);
         if (targetAdminSocket) {
@@ -199,6 +218,7 @@ io.on("connection", (socket) => {
           });
         }
       } else {
+        // Nếu không chỉ định admin, thông báo cho tất cả admin
         for (const [adminSocketId, _] of adminSockets.entries()) {
           const adminSocket = io.sockets.sockets.get(adminSocketId);
           if (adminSocket) {
@@ -231,7 +251,7 @@ io.on("connection", (socket) => {
         });
       }
     } else {
-      // Thông báo cho tất cả admin
+      // Chỉ khi không chỉ định số điện thoại admin cụ thể mới thông báo cho tất cả admin
       for (const [adminSocketId, _] of adminSockets.entries()) {
         const adminSocket = io.sockets.sockets.get(adminSocketId);
         // Chỉ thông báo cho các admin không đang trong cuộc gọi
