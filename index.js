@@ -163,6 +163,19 @@ io.on("connection", (socket) => {
         )?.[0]
       : null;
 
+    // Kiểm tra xem admin có đang trong cuộc gọi không
+    if (targetAdminId) {
+      const targetAdminSocket = io.sockets.sockets.get(targetAdminId);
+      if (targetAdminSocket && targetAdminSocket.inCall) {
+        console.log(`Target admin ${targetAdminId} is busy in another call`);
+        // Thông báo cho client rằng admin đang bận
+        return socket.emit("admin-busy", {
+          targetAdminId: targetAdminId,
+          adminName: adminSockets.get(targetAdminId)?.name || "Admin",
+        });
+      }
+    }
+
     // Hủy timeout cũ nếu có
     if (pendingCalls.has(socket.id)) {
       clearTimeout(pendingCalls.get(socket.id).timeout);
@@ -221,7 +234,8 @@ io.on("connection", (socket) => {
       // Thông báo cho tất cả admin
       for (const [adminSocketId, _] of adminSockets.entries()) {
         const adminSocket = io.sockets.sockets.get(adminSocketId);
-        if (adminSocket) {
+        // Chỉ thông báo cho các admin không đang trong cuộc gọi
+        if (adminSocket && !adminSocket.inCall) {
           adminSocket.emit("incoming-call", {
             socketId: socket.id,
             userData: socket.userData,
@@ -236,6 +250,22 @@ io.on("connection", (socket) => {
       callType: callType,
       targetAdminPhone: data?.targetAdminPhone,
     });
+  });
+
+  // Admin thông báo cuộc gọi admin đã hết thời gian
+  socket.on("admin-call-timeout", (data) => {
+    if (socket.role !== "admin") return;
+
+    console.log(
+      `Admin ${socket.id} call to admin ${data.targetAdminId} timed out`
+    );
+
+    const targetAdminSocket = io.sockets.sockets.get(data.targetAdminId);
+    if (targetAdminSocket) {
+      targetAdminSocket.emit("admin-call-timeout", {
+        adminId: socket.id,
+      });
+    }
   });
 
   // Admin gọi cho admin khác
@@ -254,6 +284,15 @@ io.on("connection", (socket) => {
 
     const targetAdminSocket = io.sockets.sockets.get(targetAdminId);
     if (targetAdminSocket) {
+      // Kiểm tra xem admin đích có đang trong cuộc gọi khác không
+      if (targetAdminSocket.inCall) {
+        console.log(`Target admin ${targetAdminId} is busy in another call`);
+        return socket.emit("admin-busy", {
+          targetAdminId: targetAdminId,
+          adminName: adminSockets.get(targetAdminId)?.name || "Admin",
+        });
+      }
+
       console.log(`Admin ${socket.id} calling admin ${targetAdminId}`);
 
       targetAdminSocket.emit("incoming-admin-call", {
@@ -270,35 +309,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Admin chấp nhận cuộc gọi từ admin khác
-  socket.on("accept-admin-call", (data) => {
-    if (socket.role !== "admin") return;
-
-    console.log(`Admin ${socket.id} accepted call from admin ${data.adminId}`);
-
-    const callingAdminSocket = io.sockets.sockets.get(data.adminId);
-    if (callingAdminSocket) {
-      callingAdminSocket.emit("admin-call-accepted", {
-        adminId: socket.id,
-        callType: data.callType,
-      });
-    }
-  });
-
-  // Admin từ chối cuộc gọi từ admin khác
-  socket.on("reject-admin-call", (data) => {
-    if (socket.role !== "admin") return;
-
-    console.log(`Admin ${socket.id} rejected call from admin ${data.adminId}`);
-
-    const callingAdminSocket = io.sockets.sockets.get(data.adminId);
-    if (callingAdminSocket) {
-      callingAdminSocket.emit("admin-call-rejected", {
-        adminId: socket.id,
-      });
-    }
-  });
-
   // Admin chấp nhận cuộc gọi
   socket.on("accept-call", (data) => {
     if (socket.role !== "admin") return;
@@ -307,6 +317,9 @@ io.on("connection", (socket) => {
       `Admin accepted ${data.callType} call for client:`,
       data.clientId
     );
+
+    // Đánh dấu admin đang trong cuộc gọi
+    socket.inCall = true;
 
     // Hủy timeout nếu có
     if (pendingCalls.has(data.clientId)) {
@@ -342,9 +355,67 @@ io.on("connection", (socket) => {
     }
   });
 
+  // Admin chấp nhận cuộc gọi từ admin khác
+  socket.on("accept-admin-call", (data) => {
+    if (socket.role !== "admin") return;
+
+    console.log(`Admin ${socket.id} accepted call from admin ${data.adminId}`);
+
+    // Đánh dấu cả hai admin đang trong cuộc gọi
+    socket.inCall = true;
+
+    const callingAdminSocket = io.sockets.sockets.get(data.adminId);
+    if (callingAdminSocket) {
+      callingAdminSocket.inCall = true;
+      callingAdminSocket.emit("admin-call-accepted", {
+        adminId: socket.id,
+        callType: data.callType,
+      });
+    }
+  });
+
+  // Admin từ chối cuộc gọi từ admin khác
+  socket.on("reject-admin-call", (data) => {
+    if (socket.role !== "admin") return;
+
+    console.log(`Admin ${socket.id} rejected call from admin ${data.adminId}`);
+
+    const callingAdminSocket = io.sockets.sockets.get(data.adminId);
+    if (callingAdminSocket) {
+      callingAdminSocket.emit("admin-call-rejected", {
+        adminId: socket.id,
+      });
+    }
+  });
+
   // Kết thúc cuộc gọi
   socket.on("end-call", (data) => {
-    console.log("Call ended by", socket.id);
+    console.log("Call ended by", socket.id, "target:", data.targetId);
+
+    // Lấy thông tin về đối tượng gọi
+    const targetSocket = io.sockets.sockets.get(data.targetId);
+    const isTargetAdmin = targetSocket && targetSocket.role === "admin";
+    const isSourceAdmin = socket.role === "admin";
+
+    // Nếu cả hai là admin (cuộc gọi admin-admin)
+    if (isSourceAdmin && isTargetAdmin) {
+      console.log("Admin-admin call ended");
+      // Cập nhật trạng thái cuộc gọi của cả hai admin
+      socket.inCall = false;
+      if (targetSocket) {
+        targetSocket.inCall = false;
+      }
+    }
+    // Nếu chỉ có một bên là admin (cuộc gọi client-admin)
+    else if (isSourceAdmin || isTargetAdmin) {
+      console.log("Client-admin call ended");
+      // Chỉ cập nhật trạng thái cuộc gọi của admin
+      if (isSourceAdmin) {
+        socket.inCall = false;
+      } else if (targetSocket) {
+        targetSocket.inCall = false;
+      }
+    }
 
     // Nếu là client kết thúc cuộc gọi, hủy timeout và xóa khỏi pendingCalls
     if (socket.role === "client" && pendingCalls.has(socket.id)) {
@@ -435,6 +506,7 @@ io.on("connection", (socket) => {
     // Nếu cuộc gọi đang trong trạng thái chờ
     if (pendingCalls.has(socket.id)) {
       const callData = pendingCalls.get(socket.id);
+      // Hủy bỏ timeout để không gửi thông báo timeout nữa
       clearTimeout(callData.timeout);
 
       // Thông báo cho admin cụ thể hoặc tất cả admin về việc hủy cuộc gọi
