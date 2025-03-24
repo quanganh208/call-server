@@ -542,6 +542,21 @@ io.on("connection", (socket) => {
   socket.on("end-call", (data) => {
     console.log("Call ended by", socket.id, "target:", data.targetId);
 
+    if (data.forceCleanup) {
+      // Nếu có targetAdminPhone, tìm và xóa tất cả cuộc gọi liên quan
+      if (data.targetAdminPhone) {
+        for (const [clientId, callData] of pendingCalls.entries()) {
+          if (callData.targetAdminPhone === data.targetAdminPhone) {
+            clearTimeout(callData.timeout);
+            pendingCalls.delete(clientId);
+            console.log(
+              `Đã xóa cuộc gọi từ ${clientId} đến ${data.targetAdminPhone} do forceCleanup`
+            );
+          }
+        }
+      }
+    }
+
     // Lấy thông tin về đối tượng gọi
     const targetSocket = io.sockets.sockets.get(data.targetId);
     const isTargetAdmin = targetSocket && targetSocket.role === "admin";
