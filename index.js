@@ -325,6 +325,7 @@ io.on("connection", (socket) => {
       socket.emit("admin-call-sent", {
         targetAdminId: targetAdminId,
         phoneNumber: data.targetAdminPhone,
+        adminName: data.adminName,
       });
     }
   });
