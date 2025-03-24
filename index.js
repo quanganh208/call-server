@@ -15,8 +15,9 @@ const io = new Server(server, {
 });
 
 // Lưu trữ thông tin phòng và người dùng
-const adminSockets = new Map(); // Thay đổi từ Set sang Map để lưu trữ thêm thông tin admin
-const pendingCalls = new Map(); // Map để lưu trữ các cuộc gọi đang chờ và timeout của chúng
+const adminSockets = new Map(); // Map lưu thông tin admin (socketId -> adminData)
+const pendingCalls = new Map(); // Map để lưu trữ các cuộc gọi client-admin đang chờ và timeout
+const pendingAdminCalls = new Map(); // Map để lưu trữ các cuộc gọi admin-admin đang chờ
 
 io.on("connection", (socket) => {
   console.log("User connected:", socket.id);
@@ -96,15 +97,61 @@ io.on("connection", (socket) => {
       }
     }
 
-    // Gửi thông báo về các cuộc gọi đang chờ cho admin mới kết nối
+    // 1. Xử lý các cuộc gọi từ client đang chờ
     for (const [clientId, callData] of pendingCalls.entries()) {
       const clientSocket = io.sockets.sockets.get(clientId);
-      if (clientSocket) {
+
+      // Kiểm tra xem cuộc gọi có nhắm đến số điện thoại của admin này không
+      const isTargetedCall = callData.targetAdminPhone
+        ? callData.targetAdminPhone === adminData.phoneNumber
+        : true;
+
+      // Nếu là cuộc gọi đến số điện thoại này, cập nhật thêm targetAdminId để phù hợp với socket ID mới
+      if (
+        isTargetedCall &&
+        callData.targetAdminPhone &&
+        callData.targetAdminPhone === adminData.phoneNumber
+      ) {
+        // Cập nhật targetAdminId để phản ánh socket ID mới của admin
+        pendingCalls.get(clientId).targetAdminId = socket.id;
+      }
+
+      if (clientSocket && isTargetedCall) {
         socket.emit("incoming-call", {
           socketId: clientId,
           userData: clientSocket.userData,
           callType: callData.callType,
+          targetSpecific: !!callData.targetAdminPhone, // Đánh dấu đây là cuộc gọi cụ thể
         });
+      }
+    }
+
+    // 2. Xử lý các cuộc gọi từ admin khác đang chờ
+    for (const [callId, adminCallData] of pendingAdminCalls.entries()) {
+      // Kiểm tra xem cuộc gọi có nhắm đến số điện thoại của admin này không
+      if (adminCallData.targetAdminPhone === adminData.phoneNumber) {
+        const callerAdminSocket = io.sockets.sockets.get(
+          adminCallData.callerAdminId
+        );
+
+        if (callerAdminSocket) {
+          // Cập nhật targetAdminId trong cuộc gọi admin
+          pendingAdminCalls.get(callId).targetAdminId = socket.id;
+
+          // Thông báo cho admin mới kết nối về cuộc gọi đang chờ
+          socket.emit("incoming-admin-call", {
+            socketId: adminCallData.callerAdminId,
+            adminData: adminSockets.get(adminCallData.callerAdminId),
+            callType: adminCallData.callType || "audio",
+          });
+
+          // Thông báo cho admin đang gọi rằng admin đích đã online
+          callerAdminSocket.emit("target-admin-online", {
+            targetAdminId: socket.id,
+            phoneNumber: adminData.phoneNumber,
+            name: adminData.name || "Admin",
+          });
+        }
       }
     }
   });
@@ -159,39 +206,49 @@ io.on("connection", (socket) => {
     // Kiểm tra xem yêu cầu có chỉ định admin cụ thể không
     const targetAdminPhone = data?.targetAdminPhone;
     let targetAdminId = null;
+    let adminIsOnline = false;
 
     if (targetAdminPhone) {
-      const foundAdmin = Array.from(adminSockets.entries()).find(
+      // Tìm tất cả admin có số điện thoại khớp
+      const matchingAdmins = Array.from(adminSockets.entries()).filter(
         ([_, adminData]) => adminData.phoneNumber === targetAdminPhone
       );
-      targetAdminId = foundAdmin?.[0] || null;
 
-      // Nếu không tìm thấy admin với số điện thoại chỉ định
-      if (!targetAdminId) {
+      if (matchingAdmins.length > 0) {
+        adminIsOnline = true;
+        // Lấy ID của admin đầu tiên có số điện thoại này
+        targetAdminId = matchingAdmins[0][0];
+
+        // Kiểm tra xem admin có đang trong cuộc gọi không
+        const targetAdminSocket = io.sockets.sockets.get(targetAdminId);
+        if (!targetAdminSocket) {
+          console.log(`Admin with id ${targetAdminId} not connected properly`);
+          adminIsOnline = false;
+        } else if (targetAdminSocket.inCall) {
+          // Kiểm tra xem có admin nào khác có cùng số điện thoại không đang trong cuộc gọi
+          const availableAdmin = matchingAdmins.find(([id, _]) => {
+            const adminSocket = io.sockets.sockets.get(id);
+            return adminSocket && !adminSocket.inCall;
+          });
+
+          if (availableAdmin) {
+            // Nếu có admin khác có cùng số điện thoại và không bận, sử dụng admin đó
+            targetAdminId = availableAdmin[0];
+          } else {
+            console.log(`All admins with phone ${targetAdminPhone} are busy`);
+            // Thông báo cho client rằng admin đang bận
+            return socket.emit("admin-busy", {
+              targetAdminId: targetAdminId,
+              adminName: adminSockets.get(targetAdminId)?.name || "Admin",
+            });
+          }
+        }
+      } else {
+        // Admin chưa online - vẫn tiếp tục cuộc gọi và đợi admin online
+        adminIsOnline = false;
         console.log(
-          `Admin with phone ${targetAdminPhone} not found or not online`
+          `Admin with phone ${targetAdminPhone} not found or not online - call will be queued`
         );
-        return socket.emit("admin-not-found", {
-          phoneNumber: targetAdminPhone,
-        });
-      }
-
-      // Kiểm tra xem admin có đang trong cuộc gọi không
-      const targetAdminSocket = io.sockets.sockets.get(targetAdminId);
-      if (!targetAdminSocket) {
-        console.log(`Admin with id ${targetAdminId} not connected`);
-        return socket.emit("admin-not-found", {
-          phoneNumber: targetAdminPhone,
-        });
-      }
-
-      if (targetAdminSocket.inCall) {
-        console.log(`Target admin ${targetAdminId} is busy in another call`);
-        // Thông báo cho client rằng admin đang bận
-        return socket.emit("admin-busy", {
-          targetAdminId: targetAdminId,
-          adminName: adminSockets.get(targetAdminId)?.name || "Admin",
-        });
       }
     }
 
@@ -203,6 +260,11 @@ io.on("connection", (socket) => {
     // Tạo timeout mới cho cuộc gọi này (60 giây)
     const timeoutId = setTimeout(() => {
       console.log(`Call from ${socket.id} timed out after 60 seconds`);
+
+      // Lưu trước khi xóa
+      const savedTargetAdminId = targetAdminId;
+      const savedTargetAdminPhone = targetAdminPhone;
+
       // Xóa cuộc gọi khỏi danh sách chờ
       pendingCalls.delete(socket.id);
 
@@ -210,13 +272,23 @@ io.on("connection", (socket) => {
       socket.emit("call-timeout");
 
       // Thông báo cho admin cụ thể cập nhật trạng thái
-      if (targetAdminId) {
-        const targetAdminSocket = io.sockets.sockets.get(targetAdminId);
-        if (targetAdminSocket) {
-          targetAdminSocket.emit("call-timeout", {
-            socketId: socket.id,
-          });
-        }
+      if (savedTargetAdminPhone) {
+        // Tìm admin dựa trên số điện thoại
+        const targetAdmins = Array.from(adminSockets.entries())
+          .filter(
+            ([_, adminData]) => adminData.phoneNumber === savedTargetAdminPhone
+          )
+          .map(([id, _]) => id);
+
+        // Thông báo cho tất cả admin có số điện thoại này
+        targetAdmins.forEach((adminId) => {
+          const adminSocket = io.sockets.sockets.get(adminId);
+          if (adminSocket) {
+            adminSocket.emit("call-timeout", {
+              socketId: socket.id,
+            });
+          }
+        });
       } else {
         // Nếu không chỉ định admin, thông báo cho tất cả admin
         for (const [adminSocketId, _] of adminSockets.entries()) {
@@ -235,12 +307,13 @@ io.on("connection", (socket) => {
       callType: callType,
       timestamp: Date.now(),
       timeout: timeoutId,
-      targetAdminId: targetAdminId, // Nếu có chỉ định admin cụ thể
+      targetAdminId: targetAdminId, // Nếu có chỉ định admin cụ thể và online
+      targetAdminPhone: targetAdminPhone, // Lưu số điện thoại admin đích nếu có
     });
 
     // Thông báo cho admin về yêu cầu gọi
-    if (targetAdminId) {
-      // Nếu có chỉ định admin cụ thể, chỉ thông báo cho admin đó
+    if (targetAdminId && adminIsOnline) {
+      // Nếu có chỉ định admin cụ thể và admin đó online, chỉ thông báo cho admin đó
       const targetAdminSocket = io.sockets.sockets.get(targetAdminId);
       if (targetAdminSocket) {
         targetAdminSocket.emit("incoming-call", {
@@ -250,7 +323,7 @@ io.on("connection", (socket) => {
           targetSpecific: true,
         });
       }
-    } else {
+    } else if (!targetAdminPhone) {
       // Chỉ khi không chỉ định số điện thoại admin cụ thể mới thông báo cho tất cả admin
       for (const [adminSocketId, _] of adminSockets.entries()) {
         const adminSocket = io.sockets.sockets.get(adminSocketId);
@@ -264,11 +337,14 @@ io.on("connection", (socket) => {
         }
       }
     }
+    // Nếu có targetAdminPhone nhưng admin không online,
+    // cuộc gọi sẽ được thêm vào hàng đợi và xử lý khi admin online
 
     // Thông báo cho khách hàng rằng yêu cầu đã được gửi
     socket.emit("call-request-sent", {
       callType: callType,
       targetAdminPhone: data?.targetAdminPhone,
+      adminIsOnline: adminIsOnline,
     });
   });
 
@@ -292,40 +368,83 @@ io.on("connection", (socket) => {
   socket.on("admin-call-admin", (data) => {
     if (socket.role !== "admin") return;
 
-    const targetAdminId = Array.from(adminSockets.entries()).find(
-      ([_, adminData]) => adminData.phoneNumber === data.targetAdminPhone
-    )?.[0];
+    const callType = data?.callType || "audio";
+    const targetAdminPhone = data.targetAdminPhone;
 
-    if (!targetAdminId) {
-      return socket.emit("admin-not-found", {
-        phoneNumber: data.targetAdminPhone,
+    if (!targetAdminPhone) {
+      return socket.emit("error", {
+        message: "Số điện thoại admin cần gọi không được cung cấp",
       });
     }
 
-    const targetAdminSocket = io.sockets.sockets.get(targetAdminId);
-    if (targetAdminSocket) {
-      // Kiểm tra xem admin đích có đang trong cuộc gọi khác không
-      if (targetAdminSocket.inCall) {
-        console.log(`Target admin ${targetAdminId} is busy in another call`);
-        return socket.emit("admin-busy", {
+    // Tạo ID duy nhất cho cuộc gọi admin-admin
+    const callId = `${socket.id}-${Date.now()}`;
+
+    // Tìm admin có số điện thoại tương ứng
+    const targetAdmin = Array.from(adminSockets.entries()).find(
+      ([_, adminData]) => adminData.phoneNumber === targetAdminPhone
+    );
+
+    if (targetAdmin) {
+      // Admin đã online
+      const targetAdminId = targetAdmin[0];
+      const targetAdminSocket = io.sockets.sockets.get(targetAdminId);
+
+      if (targetAdminSocket) {
+        // Kiểm tra xem admin đích có đang trong cuộc gọi khác không
+        if (targetAdminSocket.inCall) {
+          console.log(`Target admin ${targetAdminId} is busy in another call`);
+          return socket.emit("admin-busy", {
+            targetAdminId: targetAdminId,
+            adminName: adminSockets.get(targetAdminId)?.name || "Admin",
+          });
+        }
+
+        console.log(`Admin ${socket.id} calling admin ${targetAdminId}`);
+
+        // Lưu thông tin cuộc gọi vào pendingAdminCalls
+        pendingAdminCalls.set(callId, {
+          callerAdminId: socket.id,
           targetAdminId: targetAdminId,
+          targetAdminPhone: targetAdminPhone,
+          timestamp: Date.now(),
+          callType: callType,
+        });
+
+        targetAdminSocket.emit("incoming-admin-call", {
+          socketId: socket.id,
+          adminData: adminSockets.get(socket.id),
+          callType: callType,
+          callId: callId,
+        });
+
+        // Thông báo cho admin gọi
+        socket.emit("admin-call-sent", {
+          targetAdminId: targetAdminId,
+          phoneNumber: targetAdminPhone,
           adminName: adminSockets.get(targetAdminId)?.name || "Admin",
+          callId: callId,
         });
       }
+    } else {
+      // Admin chưa online - lưu cuộc gọi để xử lý khi admin online
+      console.log(
+        `Admin with phone ${targetAdminPhone} is not online, call will be queued`
+      );
 
-      console.log(`Admin ${socket.id} calling admin ${targetAdminId}`);
-
-      targetAdminSocket.emit("incoming-admin-call", {
-        socketId: socket.id,
-        adminData: adminSockets.get(socket.id),
-        callType: data.callType || "audio",
+      // Lưu thông tin cuộc gọi vào pendingAdminCalls
+      pendingAdminCalls.set(callId, {
+        callerAdminId: socket.id,
+        targetAdminId: null, // Chưa biết ID vì admin chưa online
+        targetAdminPhone: targetAdminPhone,
+        timestamp: Date.now(),
+        callType: callType,
       });
 
       // Thông báo cho admin gọi
-      socket.emit("admin-call-sent", {
-        targetAdminId: targetAdminId,
-        phoneNumber: data.targetAdminPhone,
-        adminName: data.adminName,
+      socket.emit("admin-call-queued", {
+        targetAdminPhone: targetAdminPhone,
+        callId: callId,
       });
     }
   });
@@ -382,7 +501,7 @@ io.on("connection", (socket) => {
 
     console.log(`Admin ${socket.id} accepted call from admin ${data.adminId}`);
 
-    // Đánh dấu cả hai admin đang trong cuộc gọi
+    // Đánh dấu admin này đang trong cuộc gọi
     socket.inCall = true;
 
     const callingAdminSocket = io.sockets.sockets.get(data.adminId);
@@ -392,10 +511,14 @@ io.on("connection", (socket) => {
         adminId: socket.id,
         callType: data.callType,
       });
+
+      // Nếu có callId, xóa khỏi pendingAdminCalls
+      if (data.callId && pendingAdminCalls.has(data.callId)) {
+        pendingAdminCalls.delete(data.callId);
+      }
     }
   });
 
-  // Admin từ chối cuộc gọi từ admin khác
   socket.on("reject-admin-call", (data) => {
     if (socket.role !== "admin") return;
 
@@ -407,6 +530,11 @@ io.on("connection", (socket) => {
         adminId: socket.id,
         adminName: socket.adminData.name,
       });
+
+      // Nếu có callId, xóa khỏi pendingAdminCalls
+      if (data.callId && pendingAdminCalls.has(data.callId)) {
+        pendingAdminCalls.delete(data.callId);
+      }
     }
   });
 
@@ -427,6 +555,11 @@ io.on("connection", (socket) => {
       if (targetSocket) {
         targetSocket.inCall = false;
       }
+
+      // Nếu có callId, xóa khỏi pendingAdminCalls
+      if (data.callId && pendingAdminCalls.has(data.callId)) {
+        pendingAdminCalls.delete(data.callId);
+      }
     }
     // Nếu chỉ có một bên là admin (cuộc gọi client-admin)
     else if (isSourceAdmin || isTargetAdmin) {
@@ -441,21 +574,34 @@ io.on("connection", (socket) => {
 
     // Nếu là client kết thúc cuộc gọi, hủy timeout và xóa khỏi pendingCalls
     if (socket.role === "client" && pendingCalls.has(socket.id)) {
-      clearTimeout(pendingCalls.get(socket.id).timeout);
+      // Lưu targetAdminId trước khi xóa
+      const callData = pendingCalls.get(socket.id);
+      const targetAdminId = callData?.targetAdminId;
+      const targetAdminPhone = callData?.targetAdminPhone;
+
+      clearTimeout(callData.timeout);
       pendingCalls.delete(socket.id);
 
       // Thông báo cho tất cả admin hoặc admin cụ thể rằng cuộc gọi đã bị hủy
-      const targetAdminId = pendingCalls.get(socket.id)?.targetAdminId;
+      if (targetAdminPhone) {
+        // Tìm admin dựa trên số điện thoại
+        const targetAdmins = Array.from(adminSockets.entries())
+          .filter(
+            ([_, adminData]) => adminData.phoneNumber === targetAdminPhone
+          )
+          .map(([id, _]) => id);
 
-      if (targetAdminId) {
-        const targetAdminSocket = io.sockets.sockets.get(targetAdminId);
-        if (targetAdminSocket) {
-          targetAdminSocket.emit("call-request-cancelled", {
-            socketId: socket.id,
-            userData: socket.userData,
-            callType: data.callType,
-          });
-        }
+        // Thông báo cho tất cả admin có số điện thoại này
+        targetAdmins.forEach((adminId) => {
+          const adminSocket = io.sockets.sockets.get(adminId);
+          if (adminSocket) {
+            adminSocket.emit("call-request-cancelled", {
+              socketId: socket.id,
+              userData: socket.userData,
+              callType: data.callType,
+            });
+          }
+        });
       } else {
         for (const [adminSocketId, _] of adminSockets.entries()) {
           const adminSocket = io.sockets.sockets.get(adminSocketId);
@@ -477,6 +623,7 @@ io.on("connection", (socket) => {
         targetSocket.emit("call-ended", {
           source: socket.id,
           isAdmin: socket.role === "admin",
+          callId: data.callId,
         });
       }
     }
@@ -489,6 +636,16 @@ io.on("connection", (socket) => {
     if (socket.role === "admin") {
       const adminData = adminSockets.get(socket.id);
       adminSockets.delete(socket.id);
+
+      // Tìm tất cả cuộc gọi admin-admin có admin này là người gọi
+      const adminCallsAsCaller = Array.from(pendingAdminCalls.entries()).filter(
+        ([_, callData]) => callData.callerAdminId === socket.id
+      );
+
+      // Xóa các cuộc gọi này vì người gọi đã offline
+      adminCallsAsCaller.forEach(([callId, _]) => {
+        pendingAdminCalls.delete(callId);
+      });
 
       // Thông báo cho các admin khác rằng một admin đã ngắt kết nối
       for (const [adminSocketId, _] of adminSockets.entries()) {
@@ -528,21 +685,33 @@ io.on("connection", (socket) => {
     // Nếu cuộc gọi đang trong trạng thái chờ
     if (pendingCalls.has(socket.id)) {
       const callData = pendingCalls.get(socket.id);
+      // Lưu targetAdminId trước khi xóa cuộc gọi
+      const targetAdminId = callData.targetAdminId;
+      const targetAdminPhone = callData.targetAdminPhone;
+
       // Hủy bỏ timeout để không gửi thông báo timeout nữa
       clearTimeout(callData.timeout);
 
       // Thông báo cho admin cụ thể hoặc tất cả admin về việc hủy cuộc gọi
-      if (callData.targetAdminId) {
-        const targetAdminSocket = io.sockets.sockets.get(
-          callData.targetAdminId
-        );
-        if (targetAdminSocket) {
-          targetAdminSocket.emit("call-request-cancelled", {
-            socketId: socket.id,
-            userData: socket.userData,
-            callType: data.callType,
-          });
-        }
+      if (targetAdminPhone) {
+        // Tìm admin dựa trên số điện thoại
+        const targetAdmins = Array.from(adminSockets.entries())
+          .filter(
+            ([_, adminData]) => adminData.phoneNumber === targetAdminPhone
+          )
+          .map(([id, _]) => id);
+
+        // Thông báo cho tất cả admin có số điện thoại này
+        targetAdmins.forEach((adminId) => {
+          const adminSocket = io.sockets.sockets.get(adminId);
+          if (adminSocket) {
+            adminSocket.emit("call-request-cancelled", {
+              socketId: socket.id,
+              userData: socket.userData,
+              callType: data.callType,
+            });
+          }
+        });
       } else {
         for (const [adminSocketId, _] of adminSockets.entries()) {
           const adminSocket = io.sockets.sockets.get(adminSocketId);
@@ -556,6 +725,7 @@ io.on("connection", (socket) => {
         }
       }
 
+      // Xóa cuộc gọi khỏi danh sách chờ sau khi hoàn tất xử lý
       pendingCalls.delete(socket.id);
     }
   });
@@ -569,6 +739,41 @@ io.on("connection", (socket) => {
     }));
 
     socket.emit("admin-phones-list", adminPhones);
+  });
+
+  // Admin hủy cuộc gọi đến admin khác
+  socket.on("cancel-admin-call", (data) => {
+    if (socket.role !== "admin") return;
+
+    console.log(
+      `Admin ${socket.id} cancelled call to admin with callId: ${data.callId}`
+    );
+
+    if (data.callId && pendingAdminCalls.has(data.callId)) {
+      const callData = pendingAdminCalls.get(data.callId);
+
+      // Nếu admin đích đã online, thông báo cho họ
+      if (callData.targetAdminId) {
+        const targetAdminSocket = io.sockets.sockets.get(
+          callData.targetAdminId
+        );
+        if (targetAdminSocket) {
+          targetAdminSocket.emit("admin-call-cancelled", {
+            callId: data.callId,
+            callerAdminId: socket.id,
+            callerAdminName: adminSockets.get(socket.id)?.name || "Admin",
+          });
+        }
+      }
+
+      // Xóa cuộc gọi khỏi danh sách chờ
+      pendingAdminCalls.delete(data.callId);
+
+      // Xác nhận với admin gọi rằng cuộc gọi đã bị hủy
+      socket.emit("admin-call-cancel-confirmed", {
+        callId: data.callId,
+      });
+    }
   });
 });
 
