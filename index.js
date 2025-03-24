@@ -404,6 +404,7 @@ io.on("connection", (socket) => {
     if (callingAdminSocket) {
       callingAdminSocket.emit("admin-call-rejected", {
         adminId: socket.id,
+        adminName: socket.adminData.name,
       });
     }
   });
