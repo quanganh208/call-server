@@ -697,6 +697,24 @@ io.on("connection", (socket) => {
   socket.on("cancel-call-request", (data) => {
     console.log(`Client ${socket.id} cancelled call request`);
 
+    // Nếu data.forceCleanup được đặt là true và có targetAdminPhone
+    if (data.forceCleanup && data.targetAdminPhone) {
+      console.log(
+        `Force cleanup requested for calls to ${data.targetAdminPhone}`
+      );
+
+      // Tìm và xóa tất cả cuộc gọi liên quan đến targetAdminPhone
+      for (const [clientId, callData] of pendingCalls.entries()) {
+        if (callData.targetAdminPhone === data.targetAdminPhone) {
+          clearTimeout(callData.timeout);
+          pendingCalls.delete(clientId);
+          console.log(
+            `Đã xóa cuộc gọi từ ${clientId} đến ${data.targetAdminPhone} do forceCleanup`
+          );
+        }
+      }
+    }
+
     // Nếu cuộc gọi đang trong trạng thái chờ
     if (pendingCalls.has(socket.id)) {
       const callData = pendingCalls.get(socket.id);
