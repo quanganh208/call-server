@@ -455,6 +455,8 @@ io.on("connection", (socket) => {
 
     const callingAdminSocket = io.sockets.sockets.get(data.adminId);
     if (callingAdminSocket) {
+      callingAdminSocket.inCall = false;
+
       callingAdminSocket.emit("admin-call-rejected", {
         adminId: socket.id,
         adminName: socket.adminData.name,
