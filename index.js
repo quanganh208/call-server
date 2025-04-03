@@ -118,16 +118,28 @@ io.on("connection", (socket) => {
       // Xóa timeout ở cả hai phía khi cuộc gọi được kết nối thành công
       const sourceCallRequest = activeCallRequests.get(socket.id);
       if (sourceCallRequest) {
-        console.log(`Clearing timeout for source ${socket.id}`);
+        console.log(
+          `[DEBUG] Clearing timeout for source ${
+            socket.id
+          }, timeout exists: ${!!sourceCallRequest.timeout}`
+        );
         clearTimeout(sourceCallRequest.timeout);
         activeCallRequests.delete(socket.id);
+      } else {
+        console.log(`[DEBUG] No timeout found for source ${socket.id}`);
       }
 
       const targetCallRequest = activeCallRequests.get(data.target);
       if (targetCallRequest) {
-        console.log(`Clearing timeout for target ${data.target}`);
+        console.log(
+          `[DEBUG] Clearing timeout for target ${
+            data.target
+          }, timeout exists: ${!!targetCallRequest.timeout}`
+        );
         clearTimeout(targetCallRequest.timeout);
         activeCallRequests.delete(data.target);
+      } else {
+        console.log(`[DEBUG] No timeout found for target ${data.target}`);
       }
 
       targetSocket.emit("answer", {
@@ -135,6 +147,10 @@ io.on("connection", (socket) => {
         source: socket.id,
         callType: data.callType,
       });
+    } else {
+      console.log(
+        `[ERROR] Target socket ${data.target} not found when processing answer`
+      );
     }
   });
 
@@ -336,6 +352,11 @@ io.on("connection", (socket) => {
               "Call request timed out. The admin didn't answer your call.",
           });
 
+          // Thêm sự kiện call-timeout để frontend có thể xử lý đóng modal
+          socket.emit("call-timeout", {
+            socketId: targetAdminId,
+          });
+
           // Notify target admin that call timed out
           if (targetAdminSocket) {
             targetAdminSocket.emit("admin-call-cancelled", {
@@ -392,8 +413,17 @@ io.on("connection", (socket) => {
     // Clear any pending timeout for this call
     const callRequest = activeCallRequests.get(data.clientId);
     if (callRequest) {
+      console.log(
+        `[DEBUG] Clearing timeout in accept-call for client ${
+          data.clientId
+        }, timeout exists: ${!!callRequest.timeout}`
+      );
       clearTimeout(callRequest.timeout);
       activeCallRequests.delete(data.clientId);
+    } else {
+      console.log(
+        `[DEBUG] No timeout found in accept-call for client ${data.clientId}`
+      );
     }
 
     // Mark admin as in call
@@ -404,6 +434,11 @@ io.on("connection", (socket) => {
       // Xóa timeout ở phía client nếu có
       const clientCallRequest = activeCallRequests.get(data.clientId);
       if (clientCallRequest) {
+        console.log(
+          `[DEBUG] Clearing timeout in accept-call for client ${
+            data.clientId
+          } (second check), timeout exists: ${!!clientCallRequest.timeout}`
+        );
         clearTimeout(clientCallRequest.timeout);
         activeCallRequests.delete(data.clientId);
       }
@@ -414,6 +449,10 @@ io.on("connection", (socket) => {
         adminName: adminSockets.get(socket.id)?.name,
         callType: data.callType,
       });
+    } else {
+      console.log(
+        `[ERROR] Client socket ${data.clientId} not found when processing accept-call`
+      );
     }
 
     // Notify other admins that call has been handled
