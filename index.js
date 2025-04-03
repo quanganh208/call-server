@@ -45,10 +45,10 @@ io.on("connection", (socket) => {
   // Admin registration with phone number
   socket.on("register-admin", (adminData) => {
     console.log(
-      "Admin registered:",
-      socket.id,
-      "with phone:",
-      adminData.phoneNumber
+        "Admin registered:",
+        socket.id,
+        "with phone:",
+        adminData.phoneNumber
     );
     socket.role = "admin";
     socket.adminData = adminData;
@@ -61,22 +61,22 @@ io.on("connection", (socket) => {
 
     // Send current client list to the admin
     const clients = Array.from(io.sockets.sockets.values())
-      .filter((s) => s.role === "client")
-      .map((s) => ({
-        socketId: s.id,
-        userData: s.userData,
-      }));
+        .filter((s) => s.role === "client")
+        .map((s) => ({
+          socketId: s.id,
+          userData: s.userData,
+        }));
 
     socket.emit("current-clients", clients);
 
     // Send other admins list to this admin
     const otherAdmins = Array.from(adminSockets.entries())
-      .filter(([id, _]) => id !== socket.id)
-      .map(([id, data]) => ({
-        socketId: id,
-        phoneNumber: data.phoneNumber,
-        name: data.name,
-      }));
+        .filter(([id, _]) => id !== socket.id)
+        .map(([id, data]) => ({
+          socketId: id,
+          phoneNumber: data.phoneNumber,
+          name: data.name,
+        }));
 
     socket.emit("current-admins", otherAdmins);
 
@@ -115,6 +115,13 @@ io.on("connection", (socket) => {
     // Send answer to offer sender
     const targetSocket = io.sockets.sockets.get(data.target);
     if (targetSocket) {
+      // Xóa timeout khi cuộc gọi được kết nối thành công
+      const callRequest = activeCallRequests.get(socket.id);
+      if (callRequest) {
+        clearTimeout(callRequest.timeout);
+        activeCallRequests.delete(socket.id);
+      }
+
       targetSocket.emit("answer", {
         answer: data.answer,
         source: socket.id,
@@ -149,7 +156,7 @@ io.on("connection", (socket) => {
     if (targetAdminPhone) {
       // Find all admins with matching phone number
       const matchingAdmins = Array.from(adminSockets.entries()).filter(
-        ([_, adminData]) => adminData.phoneNumber === targetAdminPhone
+          ([_, adminData]) => adminData.phoneNumber === targetAdminPhone
       );
 
       if (matchingAdmins.length > 0) {
@@ -272,7 +279,7 @@ io.on("connection", (socket) => {
     // Trước tiên kiểm tra xem admin gọi có đang trong cuộc gọi không
     if (socket.inCall) {
       console.log(
-        `Admin ${socket.id} đang trong cuộc gọi nhưng vẫn cố gắng gọi`
+          `Admin ${socket.id} đang trong cuộc gọi nhưng vẫn cố gắng gọi`
       );
       return socket.emit("error", {
         message: "Bạn đang trong một cuộc gọi khác",
@@ -287,7 +294,7 @@ io.on("connection", (socket) => {
 
     // Find admin with corresponding phone number
     const targetAdmin = Array.from(adminSockets.entries()).find(
-      ([_, adminData]) => adminData.phoneNumber === targetAdminPhone
+        ([_, adminData]) => adminData.phoneNumber === targetAdminPhone
     );
 
     if (targetAdmin) {
@@ -310,7 +317,7 @@ io.on("connection", (socket) => {
         // Set up timeout for admin-to-admin call
         const adminCallTimeout = setTimeout(() => {
           console.log(
-            `Admin call from ${socket.id} to ${targetAdminId} timed out`
+              `Admin call from ${socket.id} to ${targetAdminId} timed out`
           );
 
           // Notify calling admin about timeout
@@ -318,7 +325,7 @@ io.on("connection", (socket) => {
             targetAdminId: targetAdminId,
             adminName: adminSockets.get(targetAdminId)?.name || "Admin",
             message:
-              "Call request timed out. The admin didn't answer your call.",
+                "Call request timed out. The admin didn't answer your call.",
           });
 
           // Notify target admin that call timed out
@@ -370,8 +377,8 @@ io.on("connection", (socket) => {
     if (socket.role !== "admin") return;
 
     console.log(
-      `Admin accepted ${data.callType} call for client:`,
-      data.clientId
+        `Admin accepted ${data.callType} call for client:`,
+        data.clientId
     );
 
     // Clear any pending timeout for this call
@@ -386,6 +393,13 @@ io.on("connection", (socket) => {
 
     const clientSocket = io.sockets.sockets.get(data.clientId);
     if (clientSocket) {
+      // Xóa timeout ở phía client nếu có
+      const clientCallRequest = activeCallRequests.get(data.clientId);
+      if (clientCallRequest) {
+        clearTimeout(clientCallRequest.timeout);
+        activeCallRequests.delete(data.clientId);
+      }
+
       clientSocket.emit("call-accepted", {
         adminId: socket.id,
         adminPhone: adminSockets.get(socket.id)?.phoneNumber,
@@ -467,12 +481,12 @@ io.on("connection", (socket) => {
   // End call
   socket.on("end-call", (data) => {
     console.log(
-      "Call ended by",
-      socket.id,
-      "target:",
-      data.targetId,
-      "additional data:",
-      data
+        "Call ended by",
+        socket.id,
+        "target:",
+        data.targetId,
+        "additional data:",
+        data
     );
 
     // Kiểm tra nếu không có targetId nhưng có forceCleanup, chỉ reset trạng thái của socket hiện tại
@@ -513,9 +527,9 @@ io.on("connection", (socket) => {
       const targetSocket = io.sockets.sockets.get(data.targetId);
       if (targetSocket) {
         console.log(
-          `Sending call-ended event to ${data.targetId} from ${
-            socket.id
-          } with reason: ${data.endReason || "unknown"}`
+            `Sending call-ended event to ${data.targetId} from ${
+                socket.id
+            } with reason: ${data.endReason || "unknown"}`
         );
         targetSocket.emit("call-ended", {
           source: socket.id,
@@ -524,7 +538,7 @@ io.on("connection", (socket) => {
           isInitiator: data.isInitiator || false,
           endReason: data.endReason || "unknown",
           callType:
-            isSourceAdmin && isTargetAdmin ? "admin-admin" : "client-admin",
+              isSourceAdmin && isTargetAdmin ? "admin-admin" : "client-admin",
           endedBy: socket.id,
           timestamp: Date.now(),
         });
@@ -580,7 +594,7 @@ io.on("connection", (socket) => {
     if (socket.role !== "admin") return;
 
     console.log(
-      `Admin ${socket.id} cancelled call to admin ${data.targetAdminId}`
+        `Admin ${socket.id} cancelled call to admin ${data.targetAdminId}`
     );
 
     // Clear any pending timeout for this admin call
@@ -595,7 +609,7 @@ io.on("connection", (socket) => {
     const targetAdminSocket = io.sockets.sockets.get(data.targetAdminId);
     if (targetAdminSocket) {
       console.log(
-        `Sending admin-call-cancelled to ${data.targetAdminId} from ${socket.id}`
+          `Sending admin-call-cancelled to ${data.targetAdminId} from ${socket.id}`
       );
       targetAdminSocket.emit("admin-call-cancelled", {
         adminId: socket.id,
@@ -639,7 +653,7 @@ io.on("connection", (socket) => {
 
     // Tìm admin với số điện thoại tương ứng
     const targetAdmin = Array.from(adminSockets.entries()).find(
-      ([_, adminData]) => adminData.phoneNumber === targetAdminPhone
+        ([_, adminData]) => adminData.phoneNumber === targetAdminPhone
     );
 
     if (targetAdmin) {
@@ -675,18 +689,18 @@ io.on("connection", (socket) => {
       // Check for and clear admin-admin calls
       for (const [callId, callData] of activeCallRequests.entries()) {
         if (
-          callData.type === "admin-admin" &&
-          (callData.callerAdminId === socket.id ||
-            callData.targetAdminId === socket.id)
+            callData.type === "admin-admin" &&
+            (callData.callerAdminId === socket.id ||
+                callData.targetAdminId === socket.id)
         ) {
           clearTimeout(callData.timeout);
           activeCallRequests.delete(callId);
 
           // Notify the other admin if needed
           const otherAdminId =
-            callData.callerAdminId === socket.id
-              ? callData.targetAdminId
-              : callData.callerAdminId;
+              callData.callerAdminId === socket.id
+                  ? callData.targetAdminId
+                  : callData.callerAdminId;
           const otherAdminSocket = io.sockets.sockets.get(otherAdminId);
 
           if (otherAdminSocket) {
